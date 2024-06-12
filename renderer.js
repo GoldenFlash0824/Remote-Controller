@@ -27,20 +27,26 @@ let message = null;
 let stream = null;
 let mediaStream = null;
 let streamstatus = null;
+let frameCount = 0;
+let startTime = Date.now();
+let pc;
+let statsInterval = null;
+
 document.addEventListener('DOMContentLoaded', () => {
     connect();
+
     const startButton = document.getElementById('startButton');
     const stopButton = document.getElementById('stopButton');
+
     window.api.getItem('screensharing').then((data) => {
-        console.log(data);
         if (data === 'start') {
             startButton.disabled = true;
             initStreaming();
-            startStreaming();
-        }
-        else
+        } else {
             stopButton.disabled = true;
+        }
     });
+
     const connectButton = document.getElementById('connectBtn');
     if (connectButton) {
         connectButton.addEventListener('click', async () => {
@@ -72,21 +78,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 redirect: "follow",
             };
             jsonData = {
-                mappingId: 'da414505-148f-46b4-b2f9-b66eb41514e2',
-                code: '100',
-                screenCastingURL: 'https://ippcscreenshot2.vantagemdm.com/screen/hmuwti',
+                mappingId: "a1f5f7dc-0c08-4396-b0b5-1a49bf234ae6",
+                code: "100",
+                screenCastingURL:
+                    "https://ippcscreenshot2.vantagemdm.com/screen/hmuwti",
                 rtmpUrl: undefined,
                 deviceId: undefined,
                 mdmUrl: undefined,
                 deviceName: undefined,
-                deviceKey: '69887E3CBAF27F4C8A31A9C1008044A0',
+                deviceKey: "8745BC73B35AB04AA787C1553CC9D386",
                 productVersion: buildVersion,
-                protocol: 'wss',
+                protocol: "wss",
                 port: 443,
-                host: 'streaming.vantagemdm.com',
+                host: "streaming.vantagemdm.com",
                 streamMode: "live",
-                companyUrl: 'ippcscreenshot2.vantagemdm.com',
-                companyName: 'ippcscreenshot2',
+                companyUrl: "ippcscreenshot2.vantagemdm.com",
+                companyName: "ippcscreenshot2",
             };
             await window.api.setItem('mappingData', JSON.stringify(jsonData));
             await window.api.setItem('mappingId', jsonData.mappingId);
@@ -107,20 +114,18 @@ document.addEventListener('DOMContentLoaded', () => {
             window.api.loadOtherHtml('main.html');
         });
     }
+
     if (startButton) {
         startButton.addEventListener('click', async () => {
-            console.log('start');
             initStreaming();
-            startStreaming();
             window.api.setItem('screensharing', "start");
             startButton.disabled = true;
             stopButton.disabled = false;
         });
-        // connect();
     }
+
     if (stopButton) {
         stopButton.addEventListener('click', async () => {
-            console.log('stop');
             window.api.setItem('screensharing', 'stop');
             startButton.disabled = false;
             stopButton.disabled = true;
@@ -128,18 +133,22 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 });
+
 function connect(callback) {
     window.api.getItem('mappingId').then((data) => {
         mappingid = data;
     });
+
     socket = new io(socketUrl, {
         query: "mappingId=" + mappingid,
         secure: true,
         transports: ["websocket"],
     });
+
     socket.on("connect", () => {
         console.log("Connected to socket.io server");
     });
+
     setInterval(() => {
         try {
             socket.emit("/v1/alive");
@@ -147,20 +156,24 @@ function connect(callback) {
             console.error("Ping error:", e);
         }
     }, 10000);
+
     socket.on("reconnect_error", () => {
         setTimeout(() => {
             socket.connect();
         }, 1000);
     });
+
     socket.on('error', (error) => {
         socket.close();
         console.error("Can't connect to socket", error);
     });
+
     socket.on("connect_error", (error) => {
         socket.close();
         alert("Please check your device internet connection and turn on the stream again. If the problem still persists, please contact our support.");
         console.error("Can't connect to socket:", error);
     });
+
     socket.on("disconnect", (error) => {
         console.log("Disconnected:", error);
         socket.close();
@@ -168,32 +181,214 @@ function connect(callback) {
             socket.connect();
         }, 1000);
     });
+
     socket.on("/v1/ready", (response) => {
         iceServers = response.iceServers;
         console.log("Connection is ready to use", iceServers);
         if (callback) callback();
     });
+
     socket.on('/v1/stream/start', (response) => {
         stream = response.stream;
     });
+
     socket.on('/v1/stream/destroy', (response) => {
         //Do something
     });
+
     socket.on('/v1/stream/joined', (response) => {
         onStreamJoin(response);
     });
+
     socket.on('/v1/stream/leaved', (response) => {
-        console.log('leave');
         viewer = null;
         onStreamLeave(response);
     });
+
     socket.on('/v1/sdp/peer_ice', (response) => {
         onIncomingICE(response);
     });
+
     socket.on('/v1/error', (response) => {
         //Do something
     });
 }
+
+function initStreaming() {
+    if (socket) {
+        socket.close();
+    }
+    connect();
+    mediaStream = new MediaStream();
+    window.api.onFrameData((bmpData) => {
+        if (bmpData) {
+            handleBMPData(bmpData);
+        } else {
+            console.error('No BMP data received from the C++ application');
+        }
+    });
+}
+
+function updateStats(track) {
+    if (pc) {
+        pc.getStats(track).then((statsReport) => {
+            statsReport.forEach((report) => {
+                if (report.type === 'outbound-rtp' && report.kind === 'video') {
+                    const customStats = {
+                        deliveredFrames: report.framesEncoded || report.framesSent,
+                        totalFrames: report.framesSent,
+                        frameRate: report.framesPerSecond || (report.framesSent / ((Date.now() - startTime) / 1000)),
+                    };
+                    track.customStats = customStats;
+                }
+            });
+        });
+    }
+}
+
+function handleBMPData(bmpData) {
+    if (bmpData instanceof Uint8Array) {
+        const blob = new Blob([bmpData.buffer], { type: 'image/bmp' });
+        const url = URL.createObjectURL(blob);
+        const imgElement = new Image();
+        imgElement.src = url;
+        imgElement.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = imgElement.width;
+            canvas.height = imgElement.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(imgElement, 0, 0);
+            const stream = canvas.captureStream();
+            const videoTrack = stream.getVideoTracks()[0];
+            mediaStream = new MediaStream([videoTrack]);
+
+            if (pc) {
+                const sender = pc.getSenders().find(s => s.track.kind === videoTrack.kind);
+                if (sender) {
+                    sender.replaceTrack(videoTrack);
+                }
+            }
+
+            startStreaming();
+        };
+        imgElement.onerror = (error) => {
+            console.error("Error loading image:", error);
+        };
+    } else {
+        console.error('Expected bmpData to be a Uint8Array, but got:', typeof bmpData, bmpData);
+    }
+}
+
+function cleanBase64String(base64) {
+    return base64.replace(/[^A-Za-z0-9+/=]/g, '');
+}
+
+function safeAtob(base64) {
+    try {
+        return atob(base64);
+    } catch (e) {
+        console.error('Failed to decode Base64 string:', e);
+        return null;
+    }
+}
+
+function startStreaming() {
+    connect((err) => {
+        answerReceived = false;
+        if (connection) {
+            connection.close();
+        }
+        inCandidates = [];
+        outCandidates = [];
+        pc = connection = new RTCPeerConnection({
+            iceServers: iceServers,
+            optional: {
+                googCpuOveruseDetection: true,
+                googCpuOverUseThreshold: 95,
+            },
+        });
+
+        mediaStream.getTracks().forEach((track) => {
+            connection.addTrack(track, mediaStream);
+        });
+
+        connection.onicecandidate = (event) => {
+            if (event.candidate) {
+                if (answerReceived) {
+                    const data = { stream: stream, message: event.candidate };
+                    socket.emit('/v1/sdp/ice', data);
+                } else {
+                    outCandidates.push(event.candidate);
+                }
+            }
+        };
+
+        connection
+            .createOffer({
+                offerToReceiveAudio: 1,
+                offerToReceiveVideo: 1,
+            })
+            .then(
+                (desc) => {
+                    desc.sdp = desc.sdp.replace(
+                        /a=mid:video\r\n/g,
+                        "a=mid:video\r\nb=AS:256\r\n"
+                    );
+                    connection.setLocalDescription(desc);
+                    let data = { client: mappingid, stream: stream, sdpOffer: desc };
+                    socket.emit('/v1/stream/start', data);
+                    message = 'waiting';
+                },
+                (error) => {
+                    console.log('Error in Create offer, desc.sdp', error);
+                });
+
+        mediaStream.getVideoTracks()[0].addEventListener('ended', () => {
+            stopStreaming();
+        });
+
+        console.log(mediaStream);
+
+        mediaStream.oninactive = () => {
+            if (viewer == true) {
+                initStreaming();
+            }
+
+            if (statsInterval) {
+                clearInterval(statsInterval);
+            }
+
+            statsInterval = setInterval(() => {
+                if (mediaStream && mediaStream.getVideoTracks().length > 0) {
+                    updateStats(mediaStream.getVideoTracks()[0]);
+                }
+            }, 1000);
+        };
+    });
+}
+
+function stopStreaming() {
+    window.api.getItem('screensharing').then((data) => {
+        console.log(data);
+    });
+    if (connection && viewer === false) {
+        connection.close();
+        console.log('connection closed');
+    }
+    if (mediaStream) {
+        const tracks = mediaStream.getTracks();
+        for (let i in tracks) {
+            tracks[i].stop();
+        }
+    }
+    if (statsInterval) {
+        clearInterval(statsInterval);
+    }
+    message = 'done';
+    let data = "";
+    data = { stream: stream };
+}
+
 function onStreamJoin(data) {
     stream = data.stream;
     viewer = true;
@@ -213,8 +408,9 @@ function onStreamJoin(data) {
         })
         .catch(e => {
             console.log('error on streamJoin', e);
-        })
+        });
 }
+
 function onIncomingICE(response) {
     if (answerReceived) {
         if (response.message.candidate) {
@@ -222,6 +418,7 @@ function onIncomingICE(response) {
             connection.addIceCandidate(candidate);
         }
     } else {
+        console.log("Not received");
         if (!inCandidates) {
             inCandidates = [];
         }
@@ -229,113 +426,7 @@ function onIncomingICE(response) {
     }
     console.log(inCandidates);
 }
+
 function onStreamLeave() {
     startStreaming();
-}
-function startStreaming() {
-    this.connect((err) => {
-        answerReceived = false;
-        if (connection) {
-            connection.close();
-        }
-        inCandidates = [];
-        outCandidates = [];
-        connection = new RTCPeerConnection({
-            iceServers: this.iceServers,
-            optional: {
-                googCpuOveruseDetection: true,
-                googCpuOverUseThreshold: 95,
-            },
-        });
-        mediaStream.getTracks().forEach((track) => {
-            connection.addTrack(track, mediaStream);
-        });
-        connection.onicecandidate = (event) => {
-            if (event.candidate) {
-                if (answerReceived) {
-                    const data = { stream: this.stream, message: event.candidate };
-                    socket.emit('/v1/sdp/ice', data);
-                } else {
-                    outCandidates.push(event.candidate);
-                }
-            }
-        }
-        connection
-            .createOffer({
-                offerToReceiveAudio: 1,
-                offerToReceiveVideo: 1,
-            })
-            .then(
-                (desc) => {
-                    desc.sdp = desc.sdp.replace(
-                        /a=mid:video\r\n/g,
-                        "a=mid:video\r\nb=AS:256\r\n"
-                    );
-                    connection.setLocalDescription(desc);
-                    let data = { client: mappingid, stream: this.stream, sdpOffer: desc };
-                    socket.emit('/v1/stream/start', data);
-                    message = 'waiting';
-                },
-                (error) => {
-                    console.log('Error in Create offer, desc.sdp', error);
-                });
-        mediaStream.getVideoTracks()[0].addEventListener('ended', () => {
-            stopStreaming();
-            console.log('stop1');
-        });
-        mediaStream.oninactive = () => {
-            if (viewer == true) {
-                console.log('inactive');
-                initStreaming();
-                startStreaming();
-            }
-        }
-    });
-}
-function stopStreaming() {
-    console.log(connection);
-    console.log(mediaStream);
-    window.api.getItem('screensharing').then((data) => {
-        console.log(data);
-    });
-    if (connection && viewer === false) {
-        connection.close();
-        console.log('connection closed');
-    }
-    if (mediaStream) {
-        const tracks = mediaStream.getTracks();
-        for (let i in tracks) {
-            tracks[i].stop();
-        }
-        console.log('mediastream closed');
-    }
-    message = 'done';
-    // viewer = null;
-    let data = "";
-    data = { stream: this.stream };
-    //socket.emit('/v1/stream/destroy', data);
-}
-function initStreaming() {
-    socket.close();
-    connect();
-    window.api.getStream().then((sourceId) => {
-        navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: {
-                mandatory: {
-                    chromeMediaSource: 'desktop',
-                    chromeMediaSourceId: sourceId,
-                    minWidth: 1280,
-                    maxWidth: 1280,
-                    minHeight: 720,
-                    maxHeight: 720
-                }
-            }
-        }).then((stream) => {
-            console.log('Stream:', stream);
-            mediaStream = stream;
-        }).catch((error) => {
-            console.error('Error getting stream:', error);
-        });
-    });
 }

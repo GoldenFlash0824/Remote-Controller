@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, Tray, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, Tray, Menu } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const net = require('net');
@@ -9,6 +9,8 @@ let mainWindow;
 let tray;
 let isWindowClosed = false;
 let server;
+let cppProgram;
+let latestBmpData = null;
 
 async function initializeStore() {
     const { default: Store } = await import('electron-store');
@@ -63,14 +65,25 @@ async function createWindow() {
         }
     });
 
-    // const exePath = path.join(__dirname, 'ScreenCapture.exe');
-    const exePath = path.join(process.resourcesPath, 'ScreenCapture.exe');
+    ipcMain.handle('setItem', (event, key, value) => {
+        store.set(key, value);
+    });
 
+    ipcMain.handle('getItem', (event, key) => {
+        return store.get(key);
+    });
+
+    ipcMain.handle('get-stream', async (event) => {
+        return latestBmpData ? latestBmpData : null;
+    });
+
+    // const exePath = path.join(__dirname, 'ScreenCapture.exe');
+    const exePath = path.join(__dirname, 'SystemLevelScreenCapture.exe');
     if (!fs.existsSync(exePath)) {
         console.error(`Executable not found at: ${exePath}`);
     }
 
-    const cppProgram = spawn(exePath);
+    cppProgram = spawn(exePath);
 
     cppProgram.stdout.on('data', (data) => {
         console.log(`stdout: ${data}`);
@@ -92,14 +105,14 @@ async function createWindow() {
 
             while (fileBuffer.length >= 54) {
                 const fileSize = fileBuffer.readUInt32LE(2);
-
                 if (fileBuffer.length >= fileSize) {
                     const bmpData = fileBuffer.slice(0, fileSize);
                     if (!isWindowClosed && mainWindow) {
-                        mainWindow.webContents.send('get-stream', bmpData.toString('base64'));
+                        latestBmpData = bmpData;
+                        mainWindow.webContents.send('frame-data', latestBmpData);
                     }
-
                     fileBuffer = fileBuffer.slice(fileSize);
+                    // saveBitmapToFile(bmpData);
                 } else {
                     break;
                 }
@@ -118,6 +131,19 @@ async function createWindow() {
     server.listen(12345, '127.0.0.1', () => {
         console.log(`Server listening on port 12345`);
     });
+}
+
+function saveBitmapToFile(bmpData) {
+    const timestamp = new Date().toISOString().replace(/[-:.]/g, '');
+    const filepath = path.join(__dirname, `capture_${timestamp}.bmp`);
+
+    fs.writeFile(filepath, bmpData, (err) => {
+        if (err) {
+            console.error("Failed to save bitmap file: ${err}");
+        } else {
+            console.log(`Bitmap saved to file: ${filepath}`);
+        }
+    })
 }
 
 app.whenReady().then(async () => {
@@ -146,6 +172,12 @@ app.whenReady().then(async () => {
     });
 });
 
+app.on("before-quit", async () => {
+    if (mainWindow && mainWindow.webContents) {
+        await mainWindow.webContents.send('stop-screensharing');
+    }
+});
+
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
         app.quit();
@@ -157,18 +189,4 @@ app.on('activate', async () => {
         await initializeStore();
         createWindow();
     }
-});
-
-ipcMain.handle('setItem', (event, key, value) => {
-    store.set(key, value);
-});
-
-ipcMain.handle('getItem', (event, key) => {
-    return store.get(key);
-});
-
-ipcMain.handle('getStream', async (event) => {
-    const sources = await desktopCapturer.getSources({ types: ['screen'] });
-
-    return sources[0].id;
 });
